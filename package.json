@@ -1,5 +1,5 @@
 {
-  "name": "@wyre-technology/mcp-server-knowbe4",
+  "name": "@wyre-technology/knowbe4-mcp",
   "version": "1.0.0",
   "description": "MCP server for KnowBe4 — security awareness training, phishing simulation, and user risk management API integration",
   "type": "module",
