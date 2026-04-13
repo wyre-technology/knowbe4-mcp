@@ -1,8 +1,8 @@
 /**
  * KnowBe4 HTTP client and credential management.
  *
- * In gateway mode (AUTH_MODE=gateway), credentials are injected
- * into process.env by the HTTP transport layer from request headers.
+ * In gateway mode (AUTH_MODE=gateway), per-request credentials are stored
+ * in AsyncLocalStorage to prevent cross-tenant leakage under concurrent load.
  *
  * In env mode (AUTH_MODE=env or unset), credentials come from
  * KNOWBE4_API_KEY and KNOWBE4_REGION environment variables directly.
@@ -20,13 +20,29 @@
  * 4 requests/second max, 50 requests/minute burst limit.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "./logger.js";
 import { KNOWBE4_REGIONS, type KnowBe4Credentials } from "./types.js";
 
 /**
- * Get credentials from environment variables
+ * Per-request credential store for gateway mode.
+ * Prevents cross-tenant leakage when concurrent requests
+ * are handled by the same process.
+ */
+export const credentialStore = new AsyncLocalStorage<KnowBe4Credentials>();
+
+/**
+ * Get credentials from the request-scoped store (gateway mode)
+ * or from environment variables (stdio/env mode).
  */
 export function getCredentials(): KnowBe4Credentials | null {
+  // Check request-scoped credentials first (gateway mode)
+  const override = credentialStore.getStore();
+  if (override) {
+    return override;
+  }
+
+  // Fall back to environment variables (stdio/env mode)
   const apiKey = process.env.KNOWBE4_API_KEY;
 
   if (!apiKey) {

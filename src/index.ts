@@ -36,8 +36,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getDomainHandler, getAvailableDomains } from "./domains/index.js";
-import { isDomainName, type DomainName } from "./utils/types.js";
-import { getCredentials } from "./utils/client.js";
+import { isDomainName, KNOWBE4_REGIONS, type DomainName } from "./utils/types.js";
+import { getCredentials, credentialStore } from "./utils/client.js";
 import { logger } from "./utils/logger.js";
 import { setServerRef } from "./utils/server-ref.js";
 import { TOOL_CATEGORIES, findDomainForTool, routeIntent } from "./utils/categories.js";
@@ -553,9 +553,16 @@ async function startHttpTransport(): Promise<void> {
           return;
         }
 
-        // Set env vars so getCredentials() picks them up
-        process.env.KNOWBE4_API_KEY = apiKey;
-        if (region) process.env.KNOWBE4_REGION = region;
+        // Build credentials with region-to-baseUrl resolution
+        const regionKey = (region || "us").toLowerCase();
+        const baseUrl = KNOWBE4_REGIONS[regionKey] || KNOWBE4_REGIONS.us;
+
+        // Run the request handler within a credential-scoped context
+        // so all downstream getCredentials()/apiRequest() calls use these creds
+        credentialStore.run({ apiKey, baseUrl }, () => {
+          transport.handleRequest(req, res);
+        });
+        return;
       }
 
       transport.handleRequest(req, res);
