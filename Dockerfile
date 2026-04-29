@@ -18,4 +18,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 ENV NODE_ENV=production MCP_TRANSPORT=http MCP_HTTP_PORT=8080 LOG_LEVEL=info
+LABEL io.modelcontextprotocol.server.name="io.github.wyre-technology/knowbe4-mcp"
 CMD ["node", "dist/index.js"]
