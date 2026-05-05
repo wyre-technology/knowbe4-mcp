@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * KnowBe4 MCP Server with Decision Tree Architecture
+ * KnowBe4 MCP Server
  *
- * This MCP server uses a hierarchical tool loading approach:
- * 1. Initially exposes only a navigation tool
- * 2. After user selects a domain, exposes domain-specific tools
- * 3. Lazy-loads domain handlers on first access
+ * This MCP server provides tools for interacting with the KnowBe4 API.
+ * All tools are listed upfront so they work with every MCP client, including
+ * remote connectors (claude.ai, mcp-remote) that do not support dynamic
+ * tool-list changes. A helper `knowbe4_navigate` tool provides domain
+ * discovery and guidance.
  *
  * Supports both stdio and HTTP transports:
  * - stdio (default): For local Claude Desktop / CLI usage
@@ -42,8 +43,7 @@ import { logger } from "./utils/logger.js";
 import { setServerRef } from "./utils/server-ref.js";
 import { TOOL_CATEGORIES, findDomainForTool, routeIntent } from "./utils/categories.js";
 
-// Server navigation state
-let currentDomain: DomainName | null = null;
+// Navigation state removed - all tools are always available for direct-install compatibility
 
 // Create the MCP server
 const server = new Server(
@@ -61,20 +61,28 @@ const server = new Server(
 setServerRef(server);
 
 /**
- * Navigation tool - shown when at root (no domain selected)
+ * Navigation tool - stateless discovery helper that describes available tools for a domain.
+ * All domain tools are always listed in tools/list regardless of navigation state,
+ * because many MCP clients (claude.ai connectors, mcp-remote) only fetch the tool
+ * list once and do not support notifications/tools/list_changed.
  */
 const navigateTool: Tool = {
   name: "knowbe4_navigate",
   description:
-    "Navigate to a KnowBe4 domain to access its tools. Available domains: account (account info and risk scores), users (user management and risk history), groups (group management and risk scores), phishing (campaigns, security tests, recipient results), training (campaigns, enrollments, store purchases, policies), reporting (aggregated reports and risk overview).",
+    "Discover available KnowBe4 tools by domain. Returns tool names and descriptions for the selected domain. All tools are callable at any time — this is a help/discovery aid, not a prerequisite.",
   inputSchema: {
     type: "object",
     properties: {
       domain: {
         type: "string",
         enum: getAvailableDomains(),
-        description:
-          "The domain to navigate to. Choose: account, users, groups, phishing, training, or reporting",
+        description: `The domain to explore:
+- account: Account info and risk score history
+- users: User management and individual risk scores
+- groups: Group management, members, and group risk scores
+- phishing: Phishing campaigns, security tests, and recipient results
+- training: Training campaigns, enrollments, store purchases, and policies
+- reporting: Aggregated reports, risk overview, and phishing/training summaries`,
       },
     },
     required: ["domain"],
@@ -82,11 +90,11 @@ const navigateTool: Tool = {
 };
 
 /**
- * Back navigation tool - shown when inside a domain
+ * Back navigation tool - now a no-op since all tools are always available
  */
 const backTool: Tool = {
   name: "knowbe4_back",
-  description: "Navigate back to the main menu to select a different domain",
+  description: "No-op tool for backwards compatibility. All tools are always available.",
   inputSchema: {
     type: "object",
     properties: {},
@@ -94,12 +102,12 @@ const backTool: Tool = {
 };
 
 /**
- * Status tool - always available
+ * Status tool - shows credentials status and available domains
  */
 const statusTool: Tool = {
   name: "knowbe4_status",
   description:
-    "Show current navigation state and available domains. Also verifies API credentials are configured.",
+    "Show credentials status and available domains. Also verifies API credentials are configured.",
   inputSchema: {
     type: "object",
     properties: {},
@@ -183,30 +191,47 @@ function isLazyLoadingEnabled(): boolean {
 }
 
 /**
- * Get tools based on current navigation state
+ * Map from domain name to its tool definitions (loaded lazily)
  */
-async function getToolsForState(): Promise<Tool[]> {
-  const tools: Tool[] = [statusTool];
+const domainToolMap = new Map<DomainName, Tool[]>();
 
-  if (currentDomain === null) {
-    tools.unshift(navigateTool);
-  } else {
-    tools.unshift(backTool);
-    const handler = await getDomainHandler(currentDomain);
-    const domainTools = handler.getTools();
-    tools.push(...domainTools);
+/**
+ * All domain tools, collected once at startup
+ */
+let allDomainTools: Tool[] | null = null;
+
+/**
+ * Load all domain tools (lazy-loaded on first access)
+ */
+async function getAllDomainTools(): Promise<Tool[]> {
+  if (allDomainTools !== null) {
+    return allDomainTools;
   }
 
+  const domains = getAvailableDomains();
+  const tools: Tool[] = [];
+
+  for (const domain of domains) {
+    if (!domainToolMap.has(domain)) {
+      const handler = await getDomainHandler(domain);
+      const domainTools = handler.getTools();
+      domainToolMap.set(domain, domainTools);
+    }
+    tools.push(...domainToolMap.get(domain)!);
+  }
+
+  allDomainTools = tools;
   return tools;
 }
 
-// Handle ListTools requests
+// Handle ListTools requests - always returns ALL tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   if (isLazyLoadingEnabled()) {
     return { tools: metaTools };
   }
-  const tools = await getToolsForState();
-  return { tools };
+
+  const domainTools = await getAllDomainTools();
+  return { tools: [navigateTool, backTool, statusTool, ...domainTools] };
 });
 
 // Handle CallTool requests
@@ -363,7 +388,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    // Navigate to a domain
+    // Navigate to a domain - stateless discovery helper
     if (name === "knowbe4_navigate") {
       const domain = (args as { domain: string }).domain;
 
@@ -379,48 +404,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // Validate credentials before allowing navigation
-      const creds = getCredentials();
-      if (!creds) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Error: No API credentials configured. Please set the KNOWBE4_API_KEY environment variable. Optionally set KNOWBE4_REGION (us, eu, ca, uk, de) — defaults to us.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      currentDomain = domain;
       const handler = await getDomainHandler(domain);
       const domainTools = handler.getTools();
 
-      logger.info("Navigated to domain", { domain, toolCount: domainTools.length });
+      const domainDescriptions: Record<DomainName, string> = {
+        account: "Account info and risk score history",
+        users: "User management and individual risk scores",
+        groups: "Group management, members, and group risk scores",
+        phishing: "Phishing campaigns, security tests, and recipient results",
+        training: "Training campaigns, enrollments, store purchases, and policies",
+        reporting: "Aggregated reports, risk overview, and phishing/training summaries"
+      };
+
+      const toolSummary = domainTools
+        .map((t) => `- ${t.name}: ${t.description}`)
+        .join("\n");
 
       return {
         content: [
           {
             type: "text",
-            text: `Navigated to ${domain} domain.\n\nAvailable tools:\n${domainTools
-              .map((t) => `- ${t.name}: ${t.description}`)
-              .join("\n")}\n\nUse knowbe4_back to return to the main menu.`,
+            text: `${domainDescriptions[domain]}\n\nAvailable tools:\n${toolSummary}\n\nYou can call any of these tools directly.`,
           },
         ],
       };
     }
 
-    // Navigate back to root
+    // Navigate back to root - now a no-op for backwards compatibility
     if (name === "knowbe4_back") {
-      const previousDomain = currentDomain;
-      currentDomain = null;
-
       return {
         content: [
           {
             type: "text",
-            text: `Navigated back from ${previousDomain || "root"} to the main menu.\n\nAvailable domains: ${getAvailableDomains().join(", ")}\n\nUse knowbe4_navigate to select a domain.`,
+            text: `All tools are always available.\n\nAvailable domains: ${getAvailableDomains().join(", ")}\n\nUse knowbe4_navigate to discover tools by domain.`,
           },
         ],
       };
@@ -437,36 +453,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [
           {
             type: "text",
-            text: `KnowBe4 MCP Server Status\n\nCurrent domain: ${currentDomain || "(none - at main menu)"}\nCredentials: ${credStatus}\nAvailable domains: ${getAvailableDomains().join(", ")}`,
+            text: `KnowBe4 MCP Server Status\n\nCredentials: ${credStatus}\nAvailable domains: ${getAvailableDomains().join(", ")}\n\nAll tools are available at all times. Use knowbe4_navigate to discover tools by domain.`,
           },
         ],
       };
     }
 
-    // Domain-specific tool calls
-    if (currentDomain !== null) {
-      const handler = await getDomainHandler(currentDomain);
-      const domainTools = handler.getTools();
-      const toolExists = domainTools.some((t) => t.name === name);
+    // Route to appropriate domain handler based on tool name pattern
+    const toolArgs = (args ?? {}) as Record<string, unknown>;
 
-      if (toolExists) {
-        const result = await handler.handleCall(name, args as Record<string, unknown>);
-        logger.debug("Tool call completed", {
-          tool: name,
-          responseSize: JSON.stringify(result).length,
-        });
-        return result;
-      }
+    if (name.startsWith("knowbe4_account_")) {
+      const handler = await getDomainHandler("account");
+      return await handler.handleCall(name, toolArgs);
+    }
+    if (name.startsWith("knowbe4_users_")) {
+      const handler = await getDomainHandler("users");
+      return await handler.handleCall(name, toolArgs);
+    }
+    if (name.startsWith("knowbe4_groups_")) {
+      const handler = await getDomainHandler("groups");
+      return await handler.handleCall(name, toolArgs);
+    }
+    if (name.startsWith("knowbe4_phishing_")) {
+      const handler = await getDomainHandler("phishing");
+      return await handler.handleCall(name, toolArgs);
+    }
+    if (name.startsWith("knowbe4_training_")) {
+      const handler = await getDomainHandler("training");
+      return await handler.handleCall(name, toolArgs);
+    }
+    if (name.startsWith("knowbe4_reporting_")) {
+      const handler = await getDomainHandler("reporting");
+      return await handler.handleCall(name, toolArgs);
     }
 
-    // Tool not found
+    // Unknown tool
     return {
       content: [
         {
           type: "text",
-          text: currentDomain
-            ? `Unknown tool: '${name}'. You are in the '${currentDomain}' domain. Use knowbe4_back to return to the main menu.`
-            : `Unknown tool: '${name}'. Use knowbe4_navigate to select a domain first.`,
+          text: `Unknown tool: '${name}'. Use knowbe4_navigate to discover available tools by domain.`,
         },
       ],
       isError: true,
@@ -488,7 +514,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function startStdioTransport(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  const mode = isLazyLoadingEnabled() ? "lazy loading" : "decision tree";
+  const mode = isLazyLoadingEnabled() ? "lazy loading" : "flattened";
   logger.info(`KnowBe4 MCP server running on stdio (${mode} mode)`);
 }
 
