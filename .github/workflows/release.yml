@@ -18,7 +18,10 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions: { contents: write, issues: write, packages: write }
+    permissions:
+      contents: write
+      issues: write
+      packages: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       released: ${{ steps.version.outputs.released }}
